@@ -1,5 +1,3 @@
-あとで書く
-
 # Cfcloner
 
 This is a gem that clone CloudFront.
