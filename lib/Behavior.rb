@@ -130,7 +130,7 @@ class AdditionBehavior < Behavior
     # behaviorの条件
     ## PATH PATTERN
     ## origindomain/PATH もしくは origindomain/PATH?param=hoge であるurlの条件
-    @output_array_for_recv << "if(req.url ~ \"^(#{@url.gsub(/\*/, ".*")}|#{@url.gsub(/\*/, ".*")}\\?.*)\"){"
+    @output_array_for_recv << "if(req.url ~ \"^(#{@url.gsub(/\*/, "[^/]*")}|#{@url.gsub(/\*/, "[^/]*")}\\?.*)\"){"
     super
     @output_array_for_recv << "}"
     @output_array_for_recv.each_with_index do |code_line, index|
@@ -142,7 +142,7 @@ class AdditionBehavior < Behavior
     # behaviorの条件
     ## PATHの条件分岐を追加
     ## origindomain/PATH もしくは origindomain/PATH?param=hoge であるurlの条件
-    @output_array_for_backend_resp << "if(bereq.url ~ \"^(#{@url.gsub(/\*/, ".*")}|#{@url.gsub(/\*/, ".*")}\\?.*)\"){"
+    @output_array_for_backend_resp << "if(bereq.url ~ \"^(#{@url.gsub(/\*/, "[^/]")}|#{@url.gsub(/\*/, "[^/]")}\\?.*)\"){"
     super
     @output_array_for_backend_resp << "}"
     @output_array_for_backend_resp.each_with_index do |code_line, index|
@@ -155,7 +155,7 @@ class AdditionBehavior < Behavior
     ## PATHの条件分岐を追加
     ## origindomain/PATH もしくは origindomain/PATH?param=hoge であるurlの条件
     if @forward_headers.items[0] != "*"
-    @output_array_for_hash << "if(req.url ~ \"^(#{@url.gsub(/\*/, ".*")}|#{@url.gsub(/\*/, ".*")}\\?.*)\"){"
+    @output_array_for_hash << "if(req.url ~ \"^(#{@url.gsub(/\*/, "[^/]")}|#{@url.gsub(/\*/, "[^/]")}\\?.*)\"){"
     super
     @output_array_for_hash << "}"
     @output_array_for_hash.each_with_index do |code_line, index|
