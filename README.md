@@ -3,6 +3,9 @@
 This is a gem that clone CloudFront.
 This gem can convert CloudFront configs to varnish config language.
 Please set your credentials and write CloudFront instance ID in "cfcloner.rb".
+0. set ~/id_cf.rb
+0. Write `$id_cf = '**************'` into ~/id_cf.rb
+0. `bundle exec ruby ~/cfcloner/lib/cfcloner.rb`
 
 <!-- ## Installation
 

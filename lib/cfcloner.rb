@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 require "cfcloner/version"
 require "aws-sdk"
+require "../../id_cf"
 require File.dirname(__FILE__) + "/Backend"
 require File.dirname(__FILE__) + "/Behavior"
 
@@ -11,7 +12,7 @@ module Cfcloner
   )
   # ディストリビューションのidを指定してディストリビューションの情報を取ってくる
   resp = cf.get_distribution_config({
-    id: '**************'
+    id: $id_cf
   })
 
   # vclに書き出すコードの配列を宣言
