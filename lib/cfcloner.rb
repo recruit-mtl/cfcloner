@@ -1,99 +1,180 @@
 # -*- coding: utf-8 -*-
 require "cfcloner/version"
 require "aws-sdk"
+require "socket"
 require "../../id_cf"
-require File.dirname(__FILE__) + "/Backend"
-require File.dirname(__FILE__) + "/Behavior"
+require "../../host.rb"
+# require File.dirname(__FILE__) + "/Backend"
+# require File.dirname(__FILE__) + "/Behavior"
+# require File.dirname(__FILE__) + "/Nginx"
+require File.dirname(__FILE__) + "/Vcl"
+
+def extract_initial(str)
+  str.slice!(/[.].*/)
+  return str
+end
 
 module Cfcloner
+
+  entire_code = Array.new
+  host_collection = Array.new($id_cf.size).map{[]}
+  kpis = Array.new
+
   # CloudFrontのインスタンスを生成
   cf = Aws::CloudFront::Client.new(
     region: 'ap-northeast-1'
   )
-  # ディストリビューションのidを指定してディストリビューションの情報を取ってくる
-  resp = cf.get_distribution_config({
-    id: $id_cf
-  })
 
-  # vclに書き出すコードの配列を宣言
-  entire_code = Array.new
-  # vclのバージョンを指定
+  vcls = Array.new
+  $id_cf.each_with_index do |id, index|
+    begin
+      resp = cf.get_distribution({
+        id: id
+      })
+    rescue AWS::CloudFront::Errors::ServiceSrror
+      puts '[ERROR] '+ $!.message
+      exit 1
+    end
+
+    vcls[index] = Vcl.new(id, resp)
+    vcls[index].genVcl
+    # Combine with active Key Pair IDs in each host.
+    kpis.concat(vcls[index].getKeyPiarIds)
+    vcls[index].host_collection.each do |host_name|
+      host_collection[index].push(host_name)
+    end
+  end
+
+
   entire_code << "vcl 4.0;"
-
-  # Backend情報を格納する配列を宣言
-  backend_array = Array.new
-  resp.distribution_config.origins.items.each_with_index do |origin, index|
-    # CFのOriginの数だけbackend配列に格納
-    backend_array[index] = Backend.new(origin)
-    # Backendのvcl用コードを生成
-    backend_array[index].store_code_for_declar_backend
-    # entire_codeに格納
-    entire_code.concat(backend_array[index].output_array)
+  host_collection.each do |host_name|
+    entire_code << "include \"#{extract_initial(host_name[0])}.vcl\";"
   end
 
-  # Bahavior情報を格納する配列を宣言
-  behavior_array = Array.new
-  # CFのbehaviorのDefault Behavior以外をbehavior配列に格納
-  resp.distribution_config.cache_behaviors.items.each_with_index do |behavior, index|
-    behavior_array[index] = AdditionBehavior.new(behavior)
-  end
-  # CFのbehaviorのDefault Behaviorをbehavior配列に格納
-  behavior_array[behavior_array.length] = DefaultBehavior.new(resp.distribution_config.default_cache_behavior)
-
-  # Behaviorのvcl用コードを生成
-  behavior_array.each_with_index do |behavior, index|
-    behavior_array[index].store_code_for_recv
-    behavior_array[index].store_code_for_hash
-    behavior_array[index].store_code_for_backend_resp
+  kpis = kpis.uniq
+  unless kpis.empty?
+    # If Key Pair IDs is exist, output the vcl file for PrivateContent, and then include this.
+    signer = Signer.new(kpis)
+    File.open('/etc/varnish/signature.vcl', 'w') do |file|
+      file.puts signer.store_code
+    end
+    entire_code << "include \"signature.vcl\";"
   end
 
-  # vcl_recv箇所をentire_codeに格納
   entire_code << "sub vcl_recv {"
-  behavior_array.each_with_index do |behavior, index|
-    entire_code.concat(behavior.output_array_for_recv)
+  host_collection.each_with_index do |host_name, index|
+    entire_code << "  if(req.http.Host == "
+    entire_code[entire_code.length-1] += "\"#{extract_initial(host_name[0])}-#{$varnish_num}.#{$varnish_host}\" || req.http.Host == "
+    host_name.each_with_index do |host, index2|
+      entire_code[entire_code.length-1] += "\"#{host}\""
+      entire_code[entire_code.length-1] += (index2 != (host_name.size-1))? " || req.http.Host == " : ""
+    end
+    entire_code[entire_code.length-1] += "){"
+    entire_code << "    call #{extract_initial(host_name[0])}_vcl_recv;"
+    entire_code << "  }"
   end
   entire_code << "}"
 
-  # vcl_hash箇所をentire_codeに格納
+
   entire_code << "sub vcl_hash {"
-  behavior_array.each_with_index do |behavior, index|
-    entire_code.concat(behavior.output_array_for_hash)
+  host_collection.each_with_index do |host_name, index|
+    entire_code << "  if(req.http.Host == "
+    entire_code[entire_code.length-1] += "\"#{extract_initial(host_name[0])}-#{$varnish_num}.#{$varnish_host}\" || req.http.Host == "
+    host_name.each_with_index do |host, index2|
+      entire_code[entire_code.length-1] += "\"#{host}\""
+      entire_code[entire_code.length-1] += (index2 != (host_name.size-1))? " || req.http.Host == " : ""
+    end
+    entire_code[entire_code.length-1] += "){"
+    entire_code << "    call #{extract_initial(host_name[0])}_vcl_hash;"
+    entire_code << "  }"
   end
   entire_code << "}"
 
-  # vcl_backend_response箇所をentire_codeに格納
+  entire_code << "sub vcl_miss {"
+  host_collection.each_with_index do |host_name, index|
+    entire_code << "  if(req.http.Host == "
+    entire_code[entire_code.length-1] += "\"#{extract_initial(host_name[0])}-#{$varnish_num}.#{$varnish_host}\" || req.http.Host == "
+    host_name.each_with_index do |host, index2|
+      entire_code[entire_code.length-1] += "\"#{host}\""
+      entire_code[entire_code.length-1] += (index2 != (host_name.size-1))? " || req.http.Host == " : ""
+    end
+    entire_code[entire_code.length-1] += "){"
+    entire_code << "    call #{extract_initial(host_name[0])}_vcl_miss;"
+    entire_code << "  }"
+  end
+  entire_code << "}"
+
   entire_code << "sub vcl_backend_response {"
-  behavior_array.each_with_index do |behavior, index|
-    entire_code.concat(behavior.output_array_for_backend_resp)
+  host_collection.each_with_index do |host_name, index|
+    entire_code << "  if(bereq.http.Host == "
+    entire_code[entire_code.length-1] += "\"#{extract_initial(host_name[0])}-#{$varnish_num}.#{$varnish_host}\" || bereq.http.Host == "
+    host_name.each_with_index do |host, index2|
+      entire_code[entire_code.length-1] += "\"#{host}\""
+      entire_code[entire_code.length-1] += (index2 != (host_name.size-1))? " || bereq.http.Host == " : ""
+    end
+    entire_code[entire_code.length-1] += "){"
+    entire_code << "    call #{extract_initial(host_name[0])}_vcl_backend_response;"
+    entire_code << "  }"
   end
   entire_code << "}"
 
-
-  # vcl_hit箇所をentire_codeに格納
   entire_code << "sub vcl_hit {"
-  # vcl_deliverでは参照できないobj.ttlの値を一時的に保存する
-  entire_code << "  set req.http.Remain-ttl-tmp = obj.ttl;"
+  host_collection.each_with_index do |host_name, index|
+    entire_code << "  if(req.http.Host == "
+    entire_code[entire_code.length-1] += "\"#{extract_initial(host_name[0])}-#{$varnish_num}.#{$varnish_host}\" || req.http.Host == "
+    host_name.each_with_index do |host, index2|
+      entire_code[entire_code.length-1] += "\"#{host}\""
+      entire_code[entire_code.length-1] += (index2 != (host_name.size-1))? " || req.http.Host == " : ""
+    end
+    entire_code[entire_code.length-1] += "){"
+    entire_code << "    call #{extract_initial(host_name[0])}_vcl_hit;"
+    entire_code << "  }"
+  end
   entire_code << "}"
 
-  # vcl_deliverをentire_codeに格納
   entire_code << "sub vcl_deliver {"
-  entire_code << "  if(obj.hits > 0){"
-  # キャッシュが有る場合はX-CacheにHitを挿入
-  entire_code << "    set resp.http.X-Cache = \"Hit from varnish\";"
-  # X-Remain-TTLに残りのキャッシュ保持期間を格納
-  entire_code << "    set resp.http.X-Remain-TTL = req.http.Remain-ttl-tmp;"
-  # 一時的に保存したデータを削除
-  entire_code << "    unset req.http.Remain-ttl-tmp;"
-  entire_code << "  }else{"
-  # キャッシュが無い場合はX-CacheにMissを挿入
-  entire_code << "    set resp.http.X-Cache = \"Miss from varnish\";"
-  entire_code << "  }"
+  host_collection.each_with_index do |host_name, index|
+    entire_code << "  if(req.http.Host == "
+    entire_code[entire_code.length-1] += "\"#{extract_initial(host_name[0])}-#{$varnish_num}.#{$varnish_host}\" || req.http.Host == "
+    host_name.each_with_index do |host, index2|
+      entire_code[entire_code.length-1] += "\"#{host}\""
+      entire_code[entire_code.length-1] += (index2 != (host_name.size-1))? " || req.http.Host == " : ""
+    end
+    entire_code[entire_code.length-1] += "){"
+    entire_code << "    call #{extract_initial(host_name[0])}_vcl_deliver;"
+    entire_code << "  }"
+  end
   entire_code << "}"
 
-  # コードをvclに書き出す
-  File.open('/etc/varnish/default.vcl', 'w') do |file|
+  File.open("/etc/varnish/default.vcl", 'w') do |file|
     for entire_code_line in entire_code do
       file.puts entire_code_line
     end
   end
+
+
+
+
+  entire_nginx_code = Array.new
+  entire_nginx_code << "worker_processes  auto;"
+  entire_nginx_code << "events {"
+  entire_nginx_code << "  worker_connections  1024;"
+  entire_nginx_code << "}"
+  entire_nginx_code << "http {"
+  entire_nginx_code << "  include       mime.types;"
+  entire_nginx_code << "  default_type  application/octet-stream;"
+  entire_nginx_code << "  keepalive_timeout  65;"
+  entire_nginx_code << "  server_tokens off;"
+
+  Vcl.nginx_array.each do |nginx|
+    entire_nginx_code.concat(nginx.output_array)
+  end
+  entire_nginx_code << "}"
+
+  File.open('/etc/nginx/nginx.conf', 'w') do |file|
+    for entire_code_line in entire_nginx_code do
+      file.puts entire_code_line
+    end
+  end
+
 end

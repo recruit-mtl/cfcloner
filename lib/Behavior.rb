@@ -1,5 +1,5 @@
 class Behavior
-  attr_reader :output_array_for_recv, :output_array_for_hash, :output_array_for_backend_resp
+  attr_reader :output_array_for_recv, :output_array_for_hash, :output_array_for_backend_resp, :output_array_for_miss
   def initialize(cache_behavior)
     @backend_name = delete_symbol(cache_behavior.target_origin_id)
     @allowed_methods = cache_behavior.allowed_methods.items
@@ -10,13 +10,16 @@ class Behavior
     @min_ttl = cache_behavior.min_ttl
     @max_ttl = cache_behavior.max_ttl
     @default_ttl = cache_behavior.default_ttl
+    @trusted_signers = cache_behavior.trusted_signers
     @output_array_for_recv = Array.new
     @output_array_for_backend_resp = Array.new
     @output_array_for_hash = Array.new
+    @output_array_for_miss = Array.new
   end
 
 
   def store_code_for_recv
+    @output_array_for_recv << "  set req.http.X-PARAMS = regsub(req.url, \"^.*(\\?.*)$\", \"\\1\");" if @trusted_signers.enabled
     ## CFのForwardQueryStringが NO だった場合，QueryStrginを削除
     @forward_query_string? "" : "#{@output_array_for_recv << "  set req.url = regsub(req.url, \"\\?.*$\", \"\");"}"
     # ALLOWED METHODS
@@ -102,6 +105,22 @@ class Behavior
       end
       # @output_array_for_hash << "  return(lookup);"
     end
+
+    @output_array_for_hash << "  hash_data(req.http.X-PARAMS);" if @trusted_signers.enabled
+  end
+
+  def store_code_for_miss
+    ## 署名付きURLの利用している場合，署名および有効期限の検証
+    if @trusted_signers.enabled
+      @output_array_for_miss << "  call check_valid;"
+      # サブルーチンのコール後，真偽値の結果がreq.http.is_allowedに格納される
+      @output_array_for_miss << "  if(req.http.is_allowed != \"true\"){"
+      @output_array_for_miss << "    return (synth(403, \"Forbidden\"));"
+      @output_array_for_miss << "  }"
+      @output_array_for_miss << "  unset req.http.is_allowed;"
+      @output_array_for_miss << "  unset req.http.X-PARAMS;"
+    end
+    @output_array_for_miss << "  return (fetch);"
   end
 
   def delete_symbol(str)
@@ -130,7 +149,7 @@ class AdditionBehavior < Behavior
     # behaviorの条件
     ## PATH PATTERN
     ## origindomain/PATH もしくは origindomain/PATH?param=hoge であるurlの条件
-    @output_array_for_recv << "if(req.url ~ \"^(#{@url.gsub(/\*/, "[^/]*")}|#{@url.gsub(/\*/, "[^/]*")}\\?.*)\"){"
+    @output_array_for_recv << "if(req.url ~ \"^(#{@url.gsub(/\./, "\\.").gsub(/\*/, ".*")}|#{@url.gsub(/\./, "\\.").gsub(/\*/, ".*")}\\?.*)\"){"
     super
     @output_array_for_recv << "}"
     @output_array_for_recv.each_with_index do |code_line, index|
@@ -142,7 +161,7 @@ class AdditionBehavior < Behavior
     # behaviorの条件
     ## PATHの条件分岐を追加
     ## origindomain/PATH もしくは origindomain/PATH?param=hoge であるurlの条件
-    @output_array_for_backend_resp << "if(bereq.url ~ \"^(#{@url.gsub(/\*/, "[^/]*")}|#{@url.gsub(/\*/, "[^/]*")}\\?.*)\"){"
+    @output_array_for_backend_resp << "if(bereq.url ~ \"^(#{@url.gsub(/\./, "\\.").gsub(/\*/, ".*")}|#{@url.gsub(/\./, "\\.").gsub(/\*/, ".*")}\\?.*)\"){"
     super
     @output_array_for_backend_resp << "}"
     @output_array_for_backend_resp.each_with_index do |code_line, index|
@@ -155,10 +174,24 @@ class AdditionBehavior < Behavior
     ## PATHの条件分岐を追加
     ## origindomain/PATH もしくは origindomain/PATH?param=hoge であるurlの条件
     if @forward_headers.items[0] != "*"
-      @output_array_for_hash << "if(req.url ~ \"^(#{@url.gsub(/\*/, "[^/]*")}|#{@url.gsub(/\*/, "[^/]*")}\\?.*)\"){"
+      @output_array_for_hash << "if(req.url ~ \"^(#{@url.gsub(/\./, "\\.").gsub(/\*/, ".*")}|#{@url.gsub(/\./, "\\.").gsub(/\*/, ".*")}\\?.*)\"){"
       super
       @output_array_for_hash << "}"
       @output_array_for_hash.each do |code_line|
+        code_line.insert(0, "  ")
+      end
+    end
+  end
+
+  def store_code_for_miss
+    # behaviorの条件
+    ## PATHの条件分岐を追加
+    ## origindomain/PATH もしくは origindomain/PATH?param=hoge であるurlの条件
+    if @forward_headers.items[0] != "*"
+      @output_array_for_miss << "if(req.url ~ \"^(#{@url.gsub(/\./, "\\.").gsub(/\*/, ".*")}|#{@url.gsub(/\./, "\\.").gsub(/\*/, ".*")}\\?.*)\"){"
+      super
+      @output_array_for_miss << "}"
+      @output_array_for_miss.each do |code_line|
         code_line.insert(0, "  ")
       end
     end
